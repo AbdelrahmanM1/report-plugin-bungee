@@ -1,0 +1,11 @@
+# config.yml
+webhook-url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID"
+
+# reasons of reporting
+report-reasons:
+  - Cheating
+  - Abusive Language
+  - Griefing
+  - Spamming
+  - Inappropriate Skin/Name
+  - Teaming
