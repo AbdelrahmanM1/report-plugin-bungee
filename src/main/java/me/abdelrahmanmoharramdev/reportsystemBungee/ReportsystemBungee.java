@@ -14,7 +14,9 @@ import net.md_5.bungee.config.Configuration;
 import net.md_5.bungee.config.ConfigurationProvider;
 import net.md_5.bungee.config.YamlConfiguration;
 
-import java.io.*;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
@@ -29,6 +31,9 @@ public final class ReportsystemBungee extends Plugin implements Listener {
     private final ConcurrentHashMap<UUID, Long> cooldowns = new ConcurrentHashMap<>();
     private final long cooldownTime = 10 * 1000; // 10 seconds cooldown
     private final List<Report> reports = Collections.synchronizedList(new ArrayList<>());
+
+    private static final int MAX_REASON_LENGTH = 100;
+    private static final int MAX_PLAYER_NAME_LENGTH = 16;
 
     @Override
     public void onEnable() {
@@ -64,16 +69,16 @@ public final class ReportsystemBungee extends Plugin implements Listener {
             }
 
             config = ConfigurationProvider.getProvider(YamlConfiguration.class).load(file);
-            webhookUrl = config.getString("webhook-url", "");
+            webhookUrl = config.getString("webhook-url", "").trim();
             reportReasons = config.getStringList("report-reasons");
+            // Clean empty or blank reasons
+            reportReasons.removeIf(r -> r == null || r.trim().isEmpty());
 
             if (reportReasons.isEmpty()) {
-                reportReasons.add("Cheating");
-                reportReasons.add("Abusive Language");
-                reportReasons.add("Griefing");
+                reportReasons = Arrays.asList("Cheating", "Abusive Language", "Griefing");
             }
-
         } catch (IOException e) {
+            getLogger().severe("Failed to load config.yml");
             e.printStackTrace();
         }
     }
@@ -83,6 +88,7 @@ public final class ReportsystemBungee extends Plugin implements Listener {
             File file = new File(getDataFolder(), "config.yml");
             ConfigurationProvider.getProvider(YamlConfiguration.class).save(config, file);
         } catch (IOException e) {
+            getLogger().severe("Failed to save config.yml");
             e.printStackTrace();
         }
     }
@@ -115,7 +121,8 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                     if (target.equals(player)) continue; // skip self-reporting
                     TextComponent playerComp = new TextComponent(ChatColor.AQUA + target.getName() + " ");
                     playerComp.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/report " + target.getName()));
-                    playerComp.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new ComponentBuilder("Report " + target.getName()).create()));
+                    playerComp.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                            new ComponentBuilder("Report " + target.getName()).create()));
                     player.sendMessage(playerComp);
                 }
                 return;
@@ -124,6 +131,10 @@ public final class ReportsystemBungee extends Plugin implements Listener {
             // Case 2: One arg (player name) - show clickable reasons for that player
             if (args.length == 1) {
                 String targetName = args[0];
+                if (!isValidPlayerName(targetName)) {
+                    player.sendMessage(ChatColor.RED + "Invalid player name.");
+                    return;
+                }
 
                 ProxiedPlayer targetPlayer = getProxy().getPlayer(targetName);
                 if (targetPlayer == null) {
@@ -135,7 +146,8 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 for (String reason : reportReasons) {
                     TextComponent reasonComp = new TextComponent(ChatColor.GREEN + "[" + reason + "] ");
                     reasonComp.setClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, "/report " + targetName + " " + reason));
-                    reasonComp.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new ComponentBuilder("Report " + targetName + " for " + reason).create()));
+                    reasonComp.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                            new ComponentBuilder("Report " + targetName + " for " + reason).create()));
                     player.sendMessage(reasonComp);
                 }
                 return;
@@ -143,23 +155,42 @@ public final class ReportsystemBungee extends Plugin implements Listener {
 
             // Case 3: args.length >= 2 - submit the report
             String reported = args[0];
-            String reason = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
+            if (!isValidPlayerName(reported)) {
+                player.sendMessage(ChatColor.RED + "Invalid player name.");
+                return;
+            }
 
-            // Validate reported player online or allow offline? Up to you. Let's allow offline here.
-            // Optionally you could do:
-            // ProxiedPlayer reportedPlayer = getProxy().getPlayer(reported);
-            // if (reportedPlayer == null) { player.sendMessage(ChatColor.RED + "Player not found."); return; }
+            String reason = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim();
+            if (reason.isEmpty()) {
+                player.sendMessage(ChatColor.RED + "Please provide a reason.");
+                return;
+            }
+
+            if (reason.length() > MAX_REASON_LENGTH) {
+                player.sendMessage(ChatColor.RED + "Reason is too long (max " + MAX_REASON_LENGTH + " characters).");
+                return;
+            }
+
+            // Enforce reason whitelist
+            boolean validReason = reportReasons.stream()
+                    .anyMatch(r -> r.equalsIgnoreCase(reason));
+            if (!validReason) {
+                player.sendMessage(ChatColor.RED + "Invalid reason. Use one of: " + String.join(", ", reportReasons));
+                return;
+            }
 
             cooldowns.put(uuid, now);
             String time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
-            String serverName = player.getServer() != null ? player.getServer().getInfo().getName() : "Unknown";
+            String serverName = (player.getServer() != null && player.getServer().getInfo() != null)
+                    ? player.getServer().getInfo().getName()
+                    : "Unknown";
 
             player.sendMessage(ChatColor.GREEN + "✅ Report submitted for " + ChatColor.RED + reported + ChatColor.GREEN + ".");
 
             Report report = new Report(time, player.getName(), reported, reason, serverName);
             reports.add(report);
             sendToWebhook(report);
-            logToFile(report);
+            logToFileAsync(report);
             notifyModerators(report);
         }
     }
@@ -210,8 +241,10 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                     );
 
                     TextComponent tpBtn = new TextComponent(ChatColor.GREEN + " [Action]");
-                    tpBtn.setClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, "/msg " + r.reporter + " Regarding your report"));
-                    tpBtn.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new ComponentBuilder("Contact reporter").create()));
+                    tpBtn.setClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND,
+                            "/msg " + r.reporter + " Regarding your report"));
+                    tpBtn.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                            new ComponentBuilder("Contact reporter").create()));
 
                     base.addExtra(tpBtn);
                     player.sendMessage(base);
@@ -223,19 +256,19 @@ public final class ReportsystemBungee extends Plugin implements Listener {
     private void sendToWebhook(Report report) {
         if (webhookUrl == null || webhookUrl.isEmpty()) return;
 
-        String json = "{"
-                + "\"embeds\": [{"
-                + "\"title\": \"🚨 New Report\","
-                + "\"color\": 15158332,"
-                + "\"fields\": ["
-                + "{\"name\": \"📅 Time\", \"value\": \"" + report.time + "\", \"inline\": true},"
-                + "{\"name\": \"👤 Reporter\", \"value\": \"" + report.reporter + "\", \"inline\": true},"
-                + "{\"name\": \"🔴 Reported\", \"value\": \"" + report.reported + "\", \"inline\": true},"
-                + "{\"name\": \"📝 Reason\", \"value\": \"" + report.reason + "\"},"
-                + "{\"name\": \"🖥️ Server\", \"value\": \"" + report.server + "\", \"inline\": true}"
-                + "]"
-                + "}]"
-                + "}";
+        // Use StringBuilder for efficiency
+        StringBuilder json = new StringBuilder();
+        json.append("{\"embeds\":[{")
+                .append("\"title\":\"🚨 New Report\",")
+                .append("\"color\":15158332,")
+                .append("\"fields\":[")
+                .append("{\"name\":\"📅 Time\",\"value\":\"").append(report.time).append("\",\"inline\":true},")
+                .append("{\"name\":\"👤 Reporter\",\"value\":\"").append(report.reporter).append("\",\"inline\":true},")
+                .append("{\"name\":\"🔴 Reported\",\"value\":\"").append(report.reported).append("\",\"inline\":true},")
+                .append("{\"name\":\"📝 Reason\",\"value\":\"").append(report.reason).append("\"},")
+                .append("{\"name\":\"🖥️ Server\",\"value\":\"").append(report.server).append("\",\"inline\":true}")
+                .append("]}")
+                .append("]}");
 
         getProxy().getScheduler().runAsync(this, () -> {
             try {
@@ -245,12 +278,15 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 connection.setRequestProperty("Content-Type", "application/json");
                 connection.setDoOutput(true);
 
-                try (OutputStream os = connection.getOutputStream()) {
-                    os.write(json.getBytes());
+                try (var os = connection.getOutputStream()) {
+                    os.write(json.toString().getBytes());
                     os.flush();
                 }
 
-                connection.getResponseCode();
+                int responseCode = connection.getResponseCode();
+                if (responseCode != 204 && responseCode != 200) {
+                    getLogger().warning("Discord webhook returned HTTP " + responseCode);
+                }
                 connection.disconnect();
             } catch (Exception e) {
                 getLogger().warning("Failed to send to Discord webhook.");
@@ -259,13 +295,16 @@ public final class ReportsystemBungee extends Plugin implements Listener {
         });
     }
 
-    private void logToFile(Report report) {
-        try (FileWriter writer = new FileWriter(getDataFolder() + "/reports.log", true)) {
-            writer.write(String.format("[%s] [%s] %s reported %s for: %s%n", report.time, report.server, report.reporter, report.reported, report.reason));
-        } catch (Exception e) {
-            getLogger().warning("Failed to write to reports.log");
-            e.printStackTrace();
-        }
+    private void logToFileAsync(Report report) {
+        getProxy().getScheduler().runAsync(this, () -> {
+            try (FileWriter writer = new FileWriter(new File(getDataFolder(), "reports.log"), true)) {
+                writer.write(String.format("[%s] [%s] %s reported %s for: %s%n",
+                        report.time, report.server, report.reporter, report.reported, report.reason));
+            } catch (IOException e) {
+                getLogger().warning("Failed to write to reports.log");
+                e.printStackTrace();
+            }
+        });
     }
 
     private void notifyModerators(Report report) {
@@ -281,12 +320,18 @@ public final class ReportsystemBungee extends Plugin implements Listener {
         }
     }
 
+    private boolean isValidPlayerName(String name) {
+        if (name == null || name.length() == 0 || name.length() > MAX_PLAYER_NAME_LENGTH) return false;
+        // Allow only letters, numbers, and underscores (common Minecraft username rules)
+        return name.matches("[a-zA-Z0-9_]+");
+    }
+
     private static class Report {
-        String time;
-        String reporter;
-        String reported;
-        String reason;
-        String server;
+        final String time;
+        final String reporter;
+        final String reported;
+        final String reason;
+        final String server;
 
         public Report(String time, String reporter, String reported, String reason, String server) {
             this.time = time;
