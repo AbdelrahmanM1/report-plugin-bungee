@@ -95,7 +95,7 @@ public final class ReportsystemBungee extends Plugin implements Listener {
 
     private class ReportCommand extends Command {
         public ReportCommand() {
-            super("report", "reportsystem.report");
+            super("report");
         }
 
         @Override
