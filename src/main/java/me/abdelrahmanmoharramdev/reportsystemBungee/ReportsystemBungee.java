@@ -114,34 +114,30 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 return;
             }
 
-            // Case 1: No args - show clickable list of online players except self
             if (args.length == 0) {
-                player.sendMessage(ChatColor.GOLD + "Click a player to report:");
-                for (ProxiedPlayer target : getProxy().getPlayers()) {
-                    if (target.equals(player)) continue; // skip self-reporting
-                    TextComponent playerComp = new TextComponent(ChatColor.AQUA + target.getName() + " ");
-                    playerComp.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/report " + target.getName()));
-                    playerComp.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
-                            new ComponentBuilder("Report " + target.getName()).create()));
-                    player.sendMessage(playerComp);
-                }
+                player.sendMessage(ChatColor.RED + "Usage: /report <player_name> [reason]");
                 return;
             }
 
-            // Case 2: One arg (player name) - show clickable reasons for that player
+            String targetName = args[0];
+            if (!isValidPlayerName(targetName)) {
+                player.sendMessage(ChatColor.RED + "Invalid player name.");
+                return;
+            }
+
+            if (targetName.equalsIgnoreCase(player.getName())) {
+                player.sendMessage(ChatColor.RED + "You cannot report yourself.");
+                return;
+            }
+
+            ProxiedPlayer targetPlayer = getProxy().getPlayer(targetName);
+            if (targetPlayer == null) {
+                player.sendMessage(ChatColor.RED + "Player " + targetName + " not found.");
+                return;
+            }
+
             if (args.length == 1) {
-                String targetName = args[0];
-                if (!isValidPlayerName(targetName)) {
-                    player.sendMessage(ChatColor.RED + "Invalid player name.");
-                    return;
-                }
-
-                ProxiedPlayer targetPlayer = getProxy().getPlayer(targetName);
-                if (targetPlayer == null) {
-                    player.sendMessage(ChatColor.RED + "Player " + targetName + " not found.");
-                    return;
-                }
-
+                // Show clickable reasons
                 player.sendMessage(ChatColor.GOLD + "Click a reason to report " + ChatColor.AQUA + targetName + ChatColor.GOLD + ":");
                 for (String reason : reportReasons) {
                     TextComponent reasonComp = new TextComponent(ChatColor.GREEN + "[" + reason + "] ");
@@ -153,13 +149,7 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 return;
             }
 
-            // Case 3: args.length >= 2 - submit the report
-            String reported = args[0];
-            if (!isValidPlayerName(reported)) {
-                player.sendMessage(ChatColor.RED + "Invalid player name.");
-                return;
-            }
-
+            // Submit report (args.length >= 2)
             String reason = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim();
             if (reason.isEmpty()) {
                 player.sendMessage(ChatColor.RED + "Please provide a reason.");
@@ -171,7 +161,6 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 return;
             }
 
-            // Enforce reason whitelist
             boolean validReason = reportReasons.stream()
                     .anyMatch(r -> r.equalsIgnoreCase(reason));
             if (!validReason) {
@@ -185,15 +174,16 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                     ? player.getServer().getInfo().getName()
                     : "Unknown";
 
-            player.sendMessage(ChatColor.GREEN + "✅ Report submitted for " + ChatColor.RED + reported + ChatColor.GREEN + ".");
+            player.sendMessage(ChatColor.GREEN + "✅ Report submitted for " + ChatColor.RED + targetName + ChatColor.GREEN + ".");
 
-            Report report = new Report(time, player.getName(), reported, reason, serverName);
+            Report report = new Report(time, player.getName(), targetName, reason, serverName);
             reports.add(report);
             sendToWebhook(report);
             logToFileAsync(report);
             notifyModerators(report);
         }
     }
+
 
     private class ReportReloadCommand extends Command {
         public ReportReloadCommand() {
@@ -262,11 +252,11 @@ public final class ReportsystemBungee extends Plugin implements Listener {
                 .append("\"title\":\"🚨 New Report\",")
                 .append("\"color\":15158332,")
                 .append("\"fields\":[")
-                .append("{\"name\":\"📅 Time\",\"value\":\"").append(report.time).append("\",\"inline\":true},")
-                .append("{\"name\":\"👤 Reporter\",\"value\":\"").append(report.reporter).append("\",\"inline\":true},")
-                .append("{\"name\":\"🔴 Reported\",\"value\":\"").append(report.reported).append("\",\"inline\":true},")
-                .append("{\"name\":\"📝 Reason\",\"value\":\"").append(report.reason).append("\"},")
-                .append("{\"name\":\"🖥️ Server\",\"value\":\"").append(report.server).append("\",\"inline\":true}")
+                .append("{\"name\":\"Time\",\"value\":\"").append(report.time).append("\",\"inline\":true},")
+                .append("{\"name\":\"Reporter\",\"value\":\"").append(report.reporter).append("\",\"inline\":true},")
+                .append("{\"name\":\"Reported\",\"value\":\"").append(report.reported).append("\",\"inline\":true},")
+                .append("{\"name\":\"Reason\",\"value\":\"").append(report.reason).append("\"},")
+                .append("{\"name\":\"Server\",\"value\":\"").append(report.server).append("\",\"inline\":true}")
                 .append("]}")
                 .append("]}");
 
